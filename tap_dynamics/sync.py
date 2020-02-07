@@ -48,6 +48,8 @@ def sync_stream(service, catalog, state, start_date, stream, mdata):
     entitycls = service.entities[stream_name]
     query = service.query(entitycls)
 
+    query_field = None
+
     if hasattr(entitycls, MODIFIED_DATE_FIELD) or hasattr(entitycls, CREATEDON_DATE_FIELD):
         if hasattr(entitycls, MODIFIED_DATE_FIELD):
             query_field = MODIFIED_DATE_FIELD
@@ -81,17 +83,64 @@ def sync_stream(service, catalog, state, start_date, stream, mdata):
                 if prop_name in optionset_map:
                     label_prop_name = get_optionset_fieldname(prop_name)
                     if value is None:
-                        #dict_record[label_prop_name] = None
-                        # the above turns the Python null of None to the string "None", which is not good for the target DB
-                        dict_record[label_prop_name] = ''
+                        dict_record[label_prop_name] = None
                     else:
                         optionset_value = optionset_map[prop_name].get(value)
                         if optionset_value is None:
                             LOGGER.warn('Label not found for value `{}` on `{}`'.format(value, prop_name))
                         dict_record[label_prop_name] = optionset_value
 
-            if MODIFIED_DATE_FIELD in dict_record and dict_record[MODIFIED_DATE_FIELD] > max_modified:
-                    max_modified = dict_record[MODIFIED_DATE_FIELD]
+            if query_field in dict_record and dict_record[query_field] > max_modified:
+                    max_modified = dict_record[query_field]
+
+            # ################################################################################################################################################################
+            # This code block is a brute-force fix to elements withing "XX_value" fields coming back as the string "None" instead of "null"
+            # when the associated "XX_Code" value is "null".  
+            #
+            # The pattern can be seen in this raw data extract: 'crm_meetingroomcode': None, 'crm_meetingroomcode_label': None, '_crm_consultantaccountid_value': 'None'
+            #
+            #    - crm_meetingroomcode              = None, which equates to crm_meetingroomcode = null (None is what's used for null in the Pythong language)
+            #    - crm_meetingroomcode_label        = null, which is correct.  This value is looked up in the code above and handled properly.
+            #    - _crm_consultantaccountid_value   = 'None', which is a string and INCORRECT - the proper value would be:
+            #           - _crm_consultantaccountid_value = null
+            #
+            # Testing confirmed that this Dynamics Tap is recieving these "XX_value = 'None'" entries, as the dynamics tap does not perform any lookup logic for "XX_value" 
+            # columns (only for "XX_Label" columns).  This means the issue is being is being created upstream from they Dynamics Tap - either in the underlying python-odata
+            # library or from Dynamics API itself.
+            # ################################################################################################################################################################
+            # LOGGER.info('')
+            # LOGGER.info('')
+            # LOGGER.info('***********************************')
+            # LOGGER.info('*** BEGIN dict_record item loop ***')
+            # LOGGER.info('***********************************')
+            for prop, value in dict_record.items():
+                # LOGGER.info('')
+                # LOGGER.info('Prop: "{}"'.format(prop))
+                # LOGGER.info('Value: "{}"'.format(value))
+
+                if value == 'None' and prop[0] == '_' and prop[-6:].lower() == '_value':
+                    # LOGGER.info('')
+                    # LOGGER.info('*** IF CONDITION TRUE  (if value == "None" and prop[0] == "_" and prop[-6:].lower() == "_value") ***')
+                    # LOGGER.info('Before dict_record[prop]: "{}", Type: "{}"'.format(dict_record[prop], type(dict_record[prop])))
+                    dict_record[prop] = None
+                    # LOGGER.info('After dict_record[prop]: "{}", Type: "{}"'.format(dict_record[prop], type(dict_record[prop])))
+            
+            # LOGGER.info('***********************************')
+            # LOGGER.info('*** END dict_record item loop ***')
+            # LOGGER.info('***********************************')
+                    
+            # Output of this code on 2/6/2020 confirms that works as expected (notice the type change):
+            #
+            # INFO *** IF CONDITION TRUE  (if value == "None" and prop[0] == "_" and prop[-6:].lower() == "_value") ***
+            # INFO Before dict_record[prop]: "None", Type: "<class 'str'>"
+            # INFO After dict_record[prop]: "None", Type: "<class 'NoneType'>"
+            #
+            # And the resultant stream outpout RECORDS shows that "null" is now being used (see the last variable change below):
+            # BEFORE:
+            #       "crm_caterercode": null, "crm_caterercode_label": null, "_crm_roomcoordinatoruserid_value": "None", 
+            # AFTER:
+            #       "crm_caterercode": null, "crm_caterercode_label": null, "_crm_roomcoordinatoruserid_value": null,
+            ## ################################################################################################################################################################
 
             with Transformer() as transformer:
                 dict_record_t = transformer.transform(dict_record,
